@@ -1,0 +1,5 @@
+# Lightroom plug-in manager error logs
+logs.txt
+*.log
+.DS_Store
+Thumbs.db
