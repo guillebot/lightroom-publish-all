@@ -23,9 +23,11 @@ Pending: 5      Nothing pending: 18      Published: 1      Failed: 0
 
 published    Flickr  >  Portfolio                      done in 41s
 publishing   Flickr  >  Travel / Iceland               publishing... 1m 12s
-pending      Hard Drive  >  Web exports                3 new, 1 modified
-up to date   Hard Drive  >  Archive                    nothing pending
-waiting      SmugMug  >  Family                        
+incomplete   Hard Drive  >  Web exports                still 2 new
+timed out    SmugMug  >  Family                        no result after 30m 00s; moved on
+pending      Hard Drive  >  Archive                    3 new, 1 modified
+up to date   Zenfolio  >  Prints                       nothing pending
+waiting      SmugMug  >  Events
 ```
 
 The run has two phases. First every collection is inspected and labelled with what is pending, then the queued collections are published one at a time with an elapsed timer. The window stays open when the run ends so you can read the results.
