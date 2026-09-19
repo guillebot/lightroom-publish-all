@@ -35,20 +35,32 @@ The run has two phases. First every collection is inspected and labelled with wh
 - **Skip current** — gives up on the collection in progress and moves to the next one.
 - **Stop after current** — stops queueing new collections; the one in progress is allowed to finish.
 - **Close window** — closes the window. The run keeps going.
-- **Give up on a collection after** — per-collection time limit (default 30 minutes, remembered between runs).
+- **Reveal log** — opens the folder containing the run log.
+- **Give up if nothing happens for** — stall limit (default 15 minutes, remembered between runs).
 
 Lightroom's floating windows have no minimize button, so the run is also reported in Lightroom's own progress area at the top left. That stays visible after the window is closed and carries the cancel control for the whole run.
 
 ### Resilience
 
-A publish service that fails usually puts up its own error dialog, which this plug-in cannot suppress. What it can do is refuse to get stuck behind one:
+A publish service that fails usually puts up its own error dialog — for example `Can't update this collection. An internal error has occurred: bad argument #1 to '?' (string expected, got nil)`. That message comes from the service's own code, not from this plug-in, and cannot be suppressed from here. What this plug-in can do is refuse to get stuck behind one:
 
 - An error raised by `publishNow` is recorded against that row and the run continues.
-- A collection that never reports completion is abandoned after the configured time limit and marked `timed out`.
+- While a collection publishes, its remaining count is re-checked every 20 seconds. If nothing has completed within the stall limit, the collection is marked `stalled` and the run moves on. Watching for progress rather than total elapsed time means a slow but healthy upload is left alone.
 - After each publish the collection is re-checked. If items are still pending, the row is marked `incomplete` rather than `published`, so a partial failure is visible instead of silently counted as success.
 - Any unexpected error in the run itself is reported in the window instead of killing the task.
 
 Collections needing attention are listed in the footer at the end of the run.
+
+### Run log
+
+Every run appends to `PublishAllPending.log` in your Documents folder, recording which collection was being published when something went wrong:
+
+```
+2026-09-19 17:52:04  publish  SmugMug  >  Family
+2026-09-19 17:58:31  PARTIAL  SmugMug  >  Family -- finished in 6m 27s but still 4 new (the publish service probably reported an error)
+```
+
+This is the fastest way to find out which service raised an error dialog, since Lightroom's dialog does not name the collection.
 
 ### How "pending" is detected
 

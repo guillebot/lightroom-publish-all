@@ -21,16 +21,24 @@ local LrDialogs = import "LrDialogs"
 local LrFunctionContext = import "LrFunctionContext"
 local LrPrefs = import "LrPrefs"
 local LrProgressScope = import "LrProgressScope"
+local LrShell = import "LrShell"
 local LrTasks = import "LrTasks"
 local LrView = import "LrView"
 
+local PublishLog = require "PublishLog"
 local PublishStatus = require "PublishStatus"
 
 local bind = LrView.bind
 
 local BAR_WIDTH = 30
 local POLL_SECONDS = 0.25
-local DEFAULT_TIMEOUT_MINUTES = 30
+local DEFAULT_STALL_MINUTES = 15
+
+-- How often a publishing collection is re-counted to see whether it is still
+-- making progress, and the collection size above which that probe is skipped
+-- because walking the photo list is too expensive to repeat.
+local LIVENESS_PROBE_SECONDS = 20
+local LIVENESS_MAX_PHOTOS = 20000
 
 local function progressBar(done, total)
   local fraction = 0
@@ -172,9 +180,17 @@ local function buildContents(props, targets, state)
           end
         end,
       },
-      f:static_text { title = "Give up on a collection after" },
+      f:push_button {
+        title = "Reveal log",
+        action = function()
+          if state.logPath then
+            LrShell.revealInShell(state.logPath)
+          end
+        end,
+      },
+      f:static_text { title = "Give up if nothing happens for" },
       f:popup_menu {
-        value = bind("timeoutMinutes"),
+        value = bind("stallMinutes"),
         width_in_chars = 12,
         items = {
           { title = "no limit", value = 0 },
@@ -196,7 +212,7 @@ end
 
 -- Runs the check pass and then publishes queued collections, reporting each
 -- step through the bound property table and the Lightroom progress area.
-local function runPublishPass(props, targets, state, progress)
+local function runPublishPass(props, targets, state, progress, log)
   local function setProp(key, value)
     pcall(function()
       props[key] = value
@@ -251,7 +267,8 @@ local function runPublishPass(props, targets, state, progress)
     if counts.unknown or counts.total > 0 then
       setProp("status_" .. i, "pending")
       stats.queued = stats.queued + 1
-      queue[#queue + 1] = { index = i, target = target }
+      queue[#queue + 1] = { index = i, target = target, counts = counts }
+      log:write(string.format("queued   %s (%s)", target.label, PublishStatus.describe(counts)))
     else
       setProp("status_" .. i, "up to date")
       stats.upToDate = stats.upToDate + 1
@@ -294,6 +311,8 @@ local function runPublishPass(props, targets, state, progress)
     progress:setCaption(string.format("Publishing %d of %d: %s", position, #queue, target.label))
     progress:setPortionComplete(position - 1, #queue)
 
+    log:write("publish  " .. target.label)
+
     local startedAt = LrDate.currentTime()
     local finished = false
     local outcome
@@ -312,8 +331,19 @@ local function runPublishPass(props, targets, state, progress)
       issues[#issues + 1] = target.label .. " -- " .. tostring(err)
       setProp("status_" .. i, "FAILED")
       setProp("detail_" .. i, tostring(err))
+      log:write("FAILED   " .. target.label .. " -- " .. tostring(err))
     else
-      local timeoutSeconds = (tonumber(props.timeoutMinutes) or 0) * 60
+      local stallSeconds = (tonumber(props.stallMinutes) or 0) * 60
+
+      -- Watching the remaining count rather than total elapsed time means a
+      -- slow but healthy upload is left alone, while a service sitting behind
+      -- its own error dialog is caught quickly.
+      local canProbe = entry.counts ~= nil
+        and not entry.counts.unknown
+        and (entry.counts.memberCount or 0) <= LIVENESS_MAX_PHOTOS
+      local remaining = entry.counts and entry.counts.total or nil
+      local lastProgressAt = startedAt
+      local nextProbeAt = startedAt + LIVENESS_PROBE_SECONDS
 
       while not finished do
         if progress:isCanceled() then
@@ -326,13 +356,30 @@ local function runPublishPass(props, targets, state, progress)
           break
         end
 
-        local elapsed = LrDate.currentTime() - startedAt
-        if timeoutSeconds > 0 and elapsed > timeoutSeconds then
-          outcome = "timeout"
+        local now = LrDate.currentTime()
+        local detail = "publishing... " .. elapsedText(now - startedAt)
+
+        if canProbe and now >= nextProbeAt then
+          nextProbeAt = now + LIVENESS_PROBE_SECONDS
+          local snapshot = PublishStatus.pendingCounts(target.collection)
+          if not snapshot.unknown then
+            if remaining == nil or snapshot.total < remaining then
+              remaining = snapshot.total
+              lastProgressAt = now
+            end
+          end
+        end
+
+        if remaining then
+          detail = detail .. "  (" .. remaining .. " left)"
+        end
+        setProp("detail_" .. i, detail)
+
+        if stallSeconds > 0 and (now - lastProgressAt) > stallSeconds then
+          outcome = "stalled"
           break
         end
 
-        setProp("detail_" .. i, "publishing... " .. elapsedText(elapsed))
         LrTasks.sleep(POLL_SECONDS)
       end
 
@@ -352,24 +399,35 @@ local function runPublishPass(props, targets, state, progress)
         issues[#issues + 1] = target.label .. " -- still " .. PublishStatus.describe(after)
         setProp("status_" .. i, "incomplete")
         setProp("detail_" .. i, "still " .. PublishStatus.describe(after))
+        log:write(string.format(
+          "PARTIAL  %s -- finished in %s but still %s (the publish service probably reported an error)",
+          target.label, elapsedText(elapsed), PublishStatus.describe(after)
+        ))
       else
         stats.published = stats.published + 1
         setProp("status_" .. i, "published")
         setProp("detail_" .. i, "done in " .. elapsedText(elapsed))
+        log:write(string.format("done     %s in %s", target.label, elapsedText(elapsed)))
       end
     elseif outcome == "skipped" then
       stats.skipped = stats.skipped + 1
       issues[#issues + 1] = target.label .. " -- skipped by user"
       setProp("status_" .. i, "skipped")
       setProp("detail_" .. i, "skipped after " .. elapsedText(elapsed))
-    elseif outcome == "timeout" then
+      log:write(string.format("skipped  %s after %s", target.label, elapsedText(elapsed)))
+    elseif outcome == "stalled" then
       stats.skipped = stats.skipped + 1
-      issues[#issues + 1] = target.label .. " -- no result after " .. elapsedText(elapsed)
-      setProp("status_" .. i, "timed out")
-      setProp("detail_" .. i, "no result after " .. elapsedText(elapsed) .. "; moved on")
+      issues[#issues + 1] = target.label .. " -- stalled after " .. elapsedText(elapsed)
+      setProp("status_" .. i, "stalled")
+      setProp("detail_" .. i, "no progress; moved on after " .. elapsedText(elapsed))
+      log:write(string.format(
+        "STALLED  %s -- no progress for the configured limit, moved on after %s",
+        target.label, elapsedText(elapsed)
+      ))
     elseif outcome == "cancelled" then
       setProp("status_" .. i, "cancelled")
       setProp("detail_" .. i, "cancelled after " .. elapsedText(elapsed))
+      log:write("cancel   " .. target.label)
     end
 
     refreshCounters()
@@ -387,13 +445,14 @@ local function runPublishPass(props, targets, state, progress)
     headline = string.format("Finished. Published %d of %d queued collection(s).", stats.published, #queue)
   end
   setProp("headline", headline)
+  log:write(headline)
 
   if #issues > 0 then
     setProp("footer", string.format(
       "%d collection(s) need attention: %s", #issues, table.concat(issues, " | ")
     ))
   else
-    setProp("footer", "No errors.")
+    setProp("footer", "No errors. Log: " .. log.path)
   end
 
   return headline
@@ -412,19 +471,22 @@ LrTasks.startAsyncTask(function()
       return
     end
 
+    local log = PublishLog.create()
+    log:write(string.format("found %d published collection(s)", #targets))
+
     local prefs = LrPrefs.prefsForPlugin()
     local props = LrBinding.makePropertyTable(context)
     props.headline = string.format("Found %d published collection(s).", #targets)
     props.bar = progressBar(0, #targets)
     props.counters = ""
-    props.footer = "Closing this window does not stop the run; use Lightroom's progress bar to cancel."
+    props.footer = "Closing this window does not stop the run. Log: " .. log.path
     props.running = true
     props.stopRequested = false
     props.skipRequested = false
-    props.timeoutMinutes = prefs.timeoutMinutes or DEFAULT_TIMEOUT_MINUTES
+    props.stallMinutes = prefs.stallMinutes or DEFAULT_STALL_MINUTES
 
-    props:addObserver("timeoutMinutes", function()
-      prefs.timeoutMinutes = props.timeoutMinutes
+    props:addObserver("stallMinutes", function()
+      prefs.stallMinutes = props.stallMinutes
     end)
 
     for i = 1, #targets do
@@ -432,7 +494,7 @@ LrTasks.startAsyncTask(function()
       props["detail_" .. i] = ""
     end
 
-    local state = { closed = false, finished = false }
+    local state = { closed = false, finished = false, logPath = log.path }
     local contents = buildContents(props, targets, state)
 
     -- Lightroom's progress area is the only part of this that survives the
@@ -444,7 +506,7 @@ LrTasks.startAsyncTask(function()
     progress:setCancelable(true)
 
     LrTasks.startAsyncTask(function()
-      local ok, result = pcall(runPublishPass, props, targets, state, progress)
+      local ok, result = pcall(runPublishPass, props, targets, state, progress, log)
 
       if not ok then
         pcall(function()
@@ -452,6 +514,7 @@ LrTasks.startAsyncTask(function()
           props.headline = "Stopped by an unexpected error."
           props.footer = tostring(result)
         end)
+        log:write("ERROR    " .. tostring(result))
         result = "Publish All Pending stopped: " .. tostring(result)
       end
 

@@ -32,6 +32,7 @@ function PublishStatus.pendingCounts(collection)
     newCount = 0,
     modifiedCount = 0,
     removedCount = 0,
+    memberCount = 0,
     total = 0,
     unknown = false,
   }
@@ -39,6 +40,8 @@ function PublishStatus.pendingCounts(collection)
   local ok, err = pcall(function()
     local members = collection:getPhotos() or {}
     local publishedPhotos = collection:getPublishedPhotos() or {}
+
+    counts.memberCount = #members
 
     local memberIds = {}
     for _, photo in ipairs(members) do
