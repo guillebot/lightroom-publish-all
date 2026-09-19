@@ -30,10 +30,23 @@ waiting      SmugMug  >  Family
 
 The run has two phases. First every collection is inspected and labelled with what is pending, then the queued collections are published one at a time with an elapsed timer. The window stays open when the run ends so you can read the results.
 
+- **Skip current** — gives up on the collection in progress and moves to the next one.
 - **Stop after current** — stops queueing new collections; the one in progress is allowed to finish.
-- **Close** — closes the window and stops the run.
+- **Close window** — closes the window. The run keeps going.
+- **Give up on a collection after** — per-collection time limit (default 30 minutes, remembered between runs).
 
-Failures are recorded per row, so one broken publish service does not stop the rest.
+Lightroom's floating windows have no minimize button, so the run is also reported in Lightroom's own progress area at the top left. That stays visible after the window is closed and carries the cancel control for the whole run.
+
+### Resilience
+
+A publish service that fails usually puts up its own error dialog, which this plug-in cannot suppress. What it can do is refuse to get stuck behind one:
+
+- An error raised by `publishNow` is recorded against that row and the run continues.
+- A collection that never reports completion is abandoned after the configured time limit and marked `timed out`.
+- After each publish the collection is re-checked. If items are still pending, the row is marked `incomplete` rather than `published`, so a partial failure is visible instead of silently counted as success.
+- Any unexpected error in the run itself is reported in the window instead of killing the task.
+
+Collections needing attention are listed in the footer at the end of the run.
 
 ### How "pending" is detected
 
